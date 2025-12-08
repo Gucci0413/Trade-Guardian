@@ -5,14 +5,15 @@ import time
 import yfinance as yf
 from bs4 import BeautifulSoup
 
-# --- ページ設定 (必ず一番上に書く) ---
+# --- ページ設定 ---
 st.set_page_config(page_title="Trade Guardian Pro", page_icon="🛡️", layout="wide")
 
 # --- クラス定義 ---
 class TradeGuardianUI:
-    def __init__(self, refresh_token):
+    def __init__(self, refresh_token, discord_url=None):
         self.base_url = "https://api.jquants.com/v1"
         self.refresh_token = refresh_token
+        self.discord_url = discord_url # Discord用URL
         self.id_token = None
         
     def authenticate(self):
@@ -26,6 +27,13 @@ class TradeGuardianUI:
                 return True
             else: return False
         except: return False
+
+    def send_discord(self, message):
+        """Discordに通知を送る"""
+        if not self.discord_url: return
+        try:
+            requests.post(self.discord_url, json={"content": message})
+        except: pass
 
     def get_stock_data_yf(self, code):
         """株価取得"""
@@ -78,7 +86,6 @@ class TradeGuardianUI:
                         op_prev = float(prev.get("OperatingProfit", 0) or 0)
                         sales_now = float(latest.get("NetSales", 0) or 0)
                         
-                        # データ取得 (欠損対応)
                         try:
                             net_income = float(latest.get("ProfitLossAttributableToOwnersOfParent", 0))
                             net_assets = float(latest.get("NetAssets", 0))
@@ -89,7 +96,6 @@ class TradeGuardianUI:
                         if op_prev > 0 and sales_now > 0:
                             growth = ((op_now - op_prev) / op_prev) * 100
                             margin = (op_now / sales_now) * 100
-                            
                             roe = (net_income / net_assets) * 100 if net_assets > 0 else None
                             equity_ratio = (net_assets / total_assets) * 100 if total_assets > 0 else None
                             
@@ -99,7 +105,6 @@ class TradeGuardianUI:
 
                             if rank in ["S", "A"]: 
                                 price, per, ticker = self.get_stock_data_yf(code)
-                                # AIコメント簡易生成
                                 ai_comment = f"成長率{growth:.1f}% 利益率{margin:.1f}%"
                                 if per and per < 15: ai_comment += " | 💎割安"
                                 if roe and roe >= 8: ai_comment += " | 👑高効率"
@@ -118,54 +123,45 @@ class TradeGuardianUI:
 # --- UI構築 ---
 st.title("🛡️ Trade Guardian Pro")
 
-# --- サイドバー (ここを完全に修正しました) ---
+# --- サイドバー ---
 with st.sidebar:
     st.header("⚙️ 設定 & 管理")
+    
+    # ★ここにDiscord入力欄を追加しました！
     refresh_token = st.text_input("J-Quantsトークン", type="password")
+    discord_webhook = st.text_input("Discord Webhook URL", type="password", help="通知を送りたい場合に入力")
+    
     st.divider()
     
     # --- 監視リスト管理 ---
     st.subheader("📝 監視リスト")
-    
-    # セッション初期化
     if "portfolio" not in st.session_state:
         st.session_state.portfolio = [{"code": "228A", "entry": 500}]
 
-    # 1. 追加エリア
     with st.form("add_form", clear_on_submit=True):
         st.write("▼ 新規追加")
         col_in1, col_in2 = st.columns(2)
-        with col_in1:
-            in_code = st.text_input("コード", placeholder="7203")
-        with col_in2:
-            in_price = st.number_input("単価", min_value=0)
+        with col_in1: in_code = st.text_input("コード", placeholder="7203")
+        with col_in2: in_price = st.number_input("単価", min_value=0)
         
-        submitted = st.form_submit_button("リストに追加")
-        if submitted and in_code and in_price > 0:
-            st.session_state.portfolio.append({"code": in_code, "entry": in_price})
-            st.success("追加しました")
-            st.rerun()
+        if st.form_submit_button("リストに追加"):
+            if in_code and in_price > 0:
+                existing_codes = [p["code"] for p in st.session_state.portfolio]
+                if in_code in existing_codes: st.error("登録済みです")
+                else:
+                    st.session_state.portfolio.append({"code": in_code, "entry": in_price})
+                    st.success("追加しました"); time.sleep(0.5); st.rerun()
 
-    # 2. 削除エリア (確実に表示させるロジック)
     st.write("---")
-    st.write("▼ 現在のリスト (削除はゴミ箱)")
-    
-    if len(st.session_state.portfolio) == 0:
-        st.info("登録なし")
+    st.write("▼ 現在のリスト")
+    if len(st.session_state.portfolio) == 0: st.info("登録なし")
     else:
-        # 削除ボタンの処理
         for i, item in enumerate(st.session_state.portfolio):
-            # カラム比率を変えてボタンを押しやすく
             col_text, col_btn = st.columns([3, 1])
-            
-            with col_text:
-                st.text(f"{item['code']} (¥{item['entry']})")
-            
+            with col_text: st.text(f"{item['code']} (¥{item['entry']})")
             with col_btn:
-                # 削除ボタン
                 if st.button("🗑️", key=f"delete_{i}"):
-                    st.session_state.portfolio.pop(i)
-                    st.rerun()
+                    st.session_state.portfolio.pop(i); st.rerun()
 
 # --- メイン画面 ---
 tab1, tab2 = st.tabs(["📊 監視 & チャート", "⚖️ Sランク分析"])
@@ -174,7 +170,11 @@ with tab1:
     st.subheader(f"ポートフォリオ ({len(st.session_state.portfolio)}銘柄)")
     
     if st.button("株価更新 🔄", type="primary"):
-        app = TradeGuardianUI(refresh_token)
+        # ★Discord URLも渡す
+        app = TradeGuardianUI(refresh_token, discord_url=discord_webhook)
+        
+        discord_alerts = [] # 通知用メッセージを貯めるリスト
+
         for item in st.session_state.portfolio:
             code = item["code"]
             entry = item["entry"]
@@ -186,20 +186,38 @@ with tab1:
                 if price:
                     pct = ((price - entry) / entry) * 100
                     
-                    # 段階的通知ロジック
-                    status = "🟢 監視中"; color = "off"
-                    if pct <= -10: status = "⛔ 損切り (-10%)"; color = "inverse"
-                    elif pct <= -3: status = "⚠️ 警戒 (-3%〜)"
-                    elif pct >= 20: status = "🎉 利確 (+20%)"
-                    elif pct >= 5: status = "📈 上昇 (+5%〜)"
+                    status = "🟢 監視中"; 
+                    
+                    # --- 通知ロジック ---
+                    if pct <= -10:
+                        status = "⛔ 損切り (-10%)"
+                        st.error(f"【緊急】{code} が損切りライン到達！ (-10%)")
+                        discord_alerts.append(f"⛔ **【緊急売却】** `{code}` が-10%に到達！(現在:{price:,.0f}円)")
+                    elif pct <= -3:
+                        status = "⚠️ 警戒 (-3%〜)"
+                        # -3%〜-9%の間もDiscordに送るならコメントアウトを外す
+                        # discord_alerts.append(f"⚠️ **【警戒】** `{code}` が含み損拡大中 ({pct:.1f}%)")
+                    elif pct >= 20:
+                        status = "🎉 利確 (+20%)"
+                        st.balloons()
+                        discord_alerts.append(f"🎉 **【利確推奨】** `{code}` が+20%達成！おめでとうございます！")
+                    elif pct >= 5:
+                        status = "📈 上昇 (+5%〜)"
 
                     with cols[0]:
                         st.metric(label=status, value=f"{price:,.0f}円", delta=f"{pct:+.2f}%")
+                        if per: st.caption(f"PER: {per:.1f}倍")
                     with cols[1]:
                         if ticker: st.line_chart(ticker.history(period="1y")['Close'], height=150)
                 else:
                     st.error("取得エラー")
                 st.divider()
+        
+        # もしアラートがあればDiscordに送信
+        if discord_alerts:
+            full_msg = "\n".join(discord_alerts)
+            app.send_discord(full_msg)
+            st.toast("Discordに通知を送りました！")
 
 with tab2:
     st.write("Sランク分析画面 (設定からトークンを入れてください)")
