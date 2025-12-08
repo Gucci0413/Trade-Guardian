@@ -5,9 +5,10 @@ import time
 import yfinance as yf
 from bs4 import BeautifulSoup
 
-# --- ページ設定 ---
+# --- ページ設定 (必ず一番上に書く) ---
 st.set_page_config(page_title="Trade Guardian Pro", page_icon="🛡️", layout="wide")
 
+# --- クラス定義 ---
 class TradeGuardianUI:
     def __init__(self, refresh_token):
         self.base_url = "https://api.jquants.com/v1"
@@ -27,7 +28,7 @@ class TradeGuardianUI:
         except: return False
 
     def get_stock_data_yf(self, code):
-        """株価・PER取得"""
+        """株価取得"""
         try:
             search_code = code[:-1] if (len(code) == 5 and code.endswith('0')) else code
             ticker = yf.Ticker(f"{search_code}.T")
@@ -37,33 +38,8 @@ class TradeGuardianUI:
             return current_price, per, ticker
         except: return None, None, None
 
-    def generate_ai_comment(self, code, growth, margin, per, roe, equity_ratio):
-        """AI分析コメント"""
-        comment = f"**【{code} AI格付け】**\n\n"
-        
-        # 1. 成長性 & 収益性
-        if growth > 20 and margin > 10:
-            comment += f"🚀 **S級:** 成長率{growth:.1f}%、利益率{margin:.1f}%。本業最強。\n"
-        elif growth > 10:
-            comment += f"📈 **成長:** 順調に拡大中。\n"
-
-        # 2. 効率性 (ROE)
-        if roe is not None:
-            if roe >= 15: comment += f"👑 **超優秀:** ROE{roe:.1f}%。資金効率◎。\n"
-            elif roe >= 8: comment += f"✅ **合格:** ROE{roe:.1f}%。\n"
-        
-        # 3. 安全性
-        if equity_ratio is not None:
-            if equity_ratio >= 70: comment += f"🏰 **鉄壁:** 自己資本{equity_ratio:.1f}%。\n"
-            elif equity_ratio < 30: comment += f"💣 **注意:** 自己資本{equity_ratio:.1f}%。\n"
-
-        # 4. 割安性
-        if per and per < 15:
-            comment += f"💎 **割安:** PER{per:.1f}倍。\n"
-
-        return comment
-
     def analyze_sector(self, sector_name, limit=30):
+        """Sランク分析"""
         if not self.id_token: return []
         
         url = f"{self.base_url}/listed/info"
@@ -85,8 +61,7 @@ class TradeGuardianUI:
         for i, code in enumerate(target_list):
             progress = (i + 1) / len(target_list)
             progress_bar.progress(progress)
-            display_code = code[:-1] if (len(code) == 5 and code.endswith('0')) else code
-            status_text.text(f"分析中: {display_code} ...")
+            status_text.text(f"分析中: {code} ...")
             time.sleep(0.05) 
             
             try:
@@ -103,24 +78,20 @@ class TradeGuardianUI:
                         op_prev = float(prev.get("OperatingProfit", 0) or 0)
                         sales_now = float(latest.get("NetSales", 0) or 0)
                         
+                        # データ取得 (欠損対応)
                         try:
                             net_income = float(latest.get("ProfitLossAttributableToOwnersOfParent", 0))
-                            total_assets = float(latest.get("TotalAssets", 0))
                             net_assets = float(latest.get("NetAssets", 0))
+                            total_assets = float(latest.get("TotalAssets", 0))
                         except:
-                            net_income = 0
-                            total_assets = 0
-                            net_assets = 0
+                            net_income = 0; net_assets = 0; total_assets = 0
 
                         if op_prev > 0 and sales_now > 0:
                             growth = ((op_now - op_prev) / op_prev) * 100
                             margin = (op_now / sales_now) * 100
                             
-                            roe = None
-                            equity_ratio = None
-                            if total_assets > 0 and net_assets > 0:
-                                roe = (net_income / net_assets) * 100
-                                equity_ratio = (net_assets / total_assets) * 100
+                            roe = (net_income / net_assets) * 100 if net_assets > 0 else None
+                            equity_ratio = (net_assets / total_assets) * 100 if total_assets > 0 else None
                             
                             rank = "B"
                             if growth >= 20.0 and margin >= 10.0: rank = "S"
@@ -128,17 +99,16 @@ class TradeGuardianUI:
 
                             if rank in ["S", "A"]: 
                                 price, per, ticker = self.get_stock_data_yf(code)
-                                ai_reason = self.generate_ai_comment(display_code, growth, margin, per, roe, equity_ratio)
+                                # AIコメント簡易生成
+                                ai_comment = f"成長率{growth:.1f}% 利益率{margin:.1f}%"
+                                if per and per < 15: ai_comment += " | 💎割安"
+                                if roe and roe >= 8: ai_comment += " | 👑高効率"
+
                                 results.append({
-                                    "コード": display_code,
-                                    "ランク": rank,
-                                    "PER": per,
-                                    "ROE(%)": roe,           
-                                    "自己資本比率(%)": equity_ratio,
-                                    "成長率": growth,
-                                    "利益率": margin,
-                                    "AI解説": ai_reason,
-                                    "Ticker": ticker
+                                    "コード": code, "ランク": rank, "PER": per,
+                                    "ROE(%)": roe, "自己資本比率(%)": equity_ratio,
+                                    "成長率": growth, "利益率": margin,
+                                    "AI解説": ai_comment, "Ticker": ticker
                                 })
             except: pass
         
@@ -148,60 +118,63 @@ class TradeGuardianUI:
 # --- UI構築 ---
 st.title("🛡️ Trade Guardian Pro")
 
-# --- サイドバー ---
+# --- サイドバー (ここを完全に修正しました) ---
 with st.sidebar:
     st.header("⚙️ 設定 & 管理")
     refresh_token = st.text_input("J-Quantsトークン", type="password")
     st.divider()
     
-    st.subheader("📝 監視リストの管理")
+    # --- 監視リスト管理 ---
+    st.subheader("📝 監視リスト")
+    
+    # セッション初期化
     if "portfolio" not in st.session_state:
         st.session_state.portfolio = [{"code": "228A", "entry": 500}]
 
-    with st.expander("➕ 銘柄を追加する", expanded=True):
-        col_add1, col_add2 = st.columns([2, 1])
-        with col_add1:
-            new_code = st.text_input("コード", placeholder="7203", key="input_code")
-        with col_add2:
-            new_price = st.number_input("単価", min_value=0, value=0, key="input_price")
+    # 1. 追加エリア
+    with st.form("add_form", clear_on_submit=True):
+        st.write("▼ 新規追加")
+        col_in1, col_in2 = st.columns(2)
+        with col_in1:
+            in_code = st.text_input("コード", placeholder="7203")
+        with col_in2:
+            in_price = st.number_input("単価", min_value=0)
         
-        if st.button("追加", type="primary"):
-            if new_code and new_price > 0:
-                existing_codes = [p["code"] for p in st.session_state.portfolio]
-                if new_code in existing_codes:
-                    st.error("登録済みです")
-                else:
-                    st.session_state.portfolio.append({"code": new_code, "entry": new_price})
-                    st.success(f"追加: {new_code}")
-                    time.sleep(0.5)
-                    st.rerun()
-
-    st.write("---")
-    st.caption("現在の監視リスト")
-    if len(st.session_state.portfolio) == 0:
-        st.info("なし")
-    else:
-        delete_index = -1
-        for i, item in enumerate(st.session_state.portfolio):
-            col_list1, col_list2 = st.columns([3, 1])
-            with col_list1:
-                st.write(f"**{item['code']}** (取得: {item['entry']}円)")
-            with col_list2:
-                if st.button("🗑️", key=f"del_{i}"):
-                    delete_index = i
-        if delete_index != -1:
-            st.session_state.portfolio.pop(delete_index)
+        submitted = st.form_submit_button("リストに追加")
+        if submitted and in_code and in_price > 0:
+            st.session_state.portfolio.append({"code": in_code, "entry": in_price})
+            st.success("追加しました")
             st.rerun()
 
-# --- メインコンテンツ ---
+    # 2. 削除エリア (確実に表示させるロジック)
+    st.write("---")
+    st.write("▼ 現在のリスト (削除はゴミ箱)")
+    
+    if len(st.session_state.portfolio) == 0:
+        st.info("登録なし")
+    else:
+        # 削除ボタンの処理
+        for i, item in enumerate(st.session_state.portfolio):
+            # カラム比率を変えてボタンを押しやすく
+            col_text, col_btn = st.columns([3, 1])
+            
+            with col_text:
+                st.text(f"{item['code']} (¥{item['entry']})")
+            
+            with col_btn:
+                # 削除ボタン
+                if st.button("🗑️", key=f"delete_{i}"):
+                    st.session_state.portfolio.pop(i)
+                    st.rerun()
+
+# --- メイン画面 ---
 tab1, tab2 = st.tabs(["📊 監視 & チャート", "⚖️ Sランク分析"])
 
 with tab1:
-    st.subheader(f"ポートフォリオ監視 ({len(st.session_state.portfolio)}銘柄)")
+    st.subheader(f"ポートフォリオ ({len(st.session_state.portfolio)}銘柄)")
     
-    if st.button("株価を更新する 🔄", type="primary"):
+    if st.button("株価更新 🔄", type="primary"):
         app = TradeGuardianUI(refresh_token)
-        
         for item in st.session_state.portfolio:
             code = item["code"]
             entry = item["entry"]
@@ -210,76 +183,38 @@ with tab1:
             with st.container():
                 st.markdown(f"#### {code}")
                 cols = st.columns([2, 3])
-                
                 if price:
                     pct = ((price - entry) / entry) * 100
                     
-                    # --- ★ここが新機能: 段階的通知ロジック ---
-                    status = "🟢 監視中"
-                    bg_color = "white"
-                    
-                    # 下落サイド (-3%刻み)
-                    if pct <= -10:
-                        status = "⛔ 損切り (-10%)"
-                        st.error(f"【緊急】{code} が損切りライン到達！ (-10%)")
-                    elif pct <= -9:
-                        status = "⚠️ 危険水域 (-9%)"
-                        st.warning(f"【危険】{code} が-9%です。損切り準備を。")
-                    elif pct <= -6:
-                        status = "⚠️ 警戒レベル (-6%)"
-                    elif pct <= -3:
-                        status = "📉 軽微な下落 (-3%)"
-                    
-                    # 上昇サイド (+5%刻み)
-                    elif pct >= 20:
-                        status = "🎉 目標達成 (+20%)"
-                        st.balloons() # お祝い演出
-                        st.success(f"【祝】{code} が+20%達成！利益確定しましょう！")
-                    elif pct >= 15:
-                        status = "📈 利確準備 (+15%)"
-                        st.toast(f"{code} もうすぐ目標達成です！")
-                    elif pct >= 10:
-                        status = "📈 含み益拡大 (+10%)"
-                    elif pct >= 5:
-                        status = "📈 上昇トレンド (+5%)"
-                    
+                    # 段階的通知ロジック
+                    status = "🟢 監視中"; color = "off"
+                    if pct <= -10: status = "⛔ 損切り (-10%)"; color = "inverse"
+                    elif pct <= -3: status = "⚠️ 警戒 (-3%〜)"
+                    elif pct >= 20: status = "🎉 利確 (+20%)"
+                    elif pct >= 5: status = "📈 上昇 (+5%〜)"
+
                     with cols[0]:
                         st.metric(label=status, value=f"{price:,.0f}円", delta=f"{pct:+.2f}%")
-                        if per: st.caption(f"PER: {per:.1f}倍")
                     with cols[1]:
                         if ticker: st.line_chart(ticker.history(period="1y")['Close'], height=150)
                 else:
-                    st.error("株価取得エラー")
-                    
+                    st.error("取得エラー")
                 st.divider()
 
 with tab2:
-    st.subheader("プロ基準スクリーニング")
-    col1, col2 = st.columns([2, 1])
-    with col1: target_sector = st.selectbox("業種", ["情報･通信業", "電気機器", "サービス業", "医薬品", "輸送用機器", "化学", "建設業"])
-    with col2: limit_num = st.number_input("上限", value=20)
+    st.write("Sランク分析画面 (設定からトークンを入れてください)")
+    col1, col2 = st.columns([2,1])
+    with col1: target = st.selectbox("業種", ["情報･通信業", "電気機器", "サービス業", "医薬品"])
+    with col2: limit = st.number_input("上限", value=10)
     
-    if st.button("銘柄を探す 🔍", type="primary"):
+    if st.button("分析開始 🔍"):
         app = TradeGuardianUI(refresh_token)
         if app.authenticate():
-            results = app.analyze_sector(target_sector, limit=limit_num)
-            if results:
-                st.success(f"{len(results)}件 ヒットしました")
-                for res in results:
-                    roe_disp = f"{res['ROE(%)']:.1f}%" if res['ROE(%)'] is not None else "---"
-                    eq_disp = f"{res['自己資本比率(%)']:.1f}%" if res['自己資本比率(%)'] is not None else "---"
-                    badge = "👑" if res['ROE(%)'] is not None and res['ROE(%)'] >= 8 else ""
-                    
-                    with st.expander(f"{badge} {res['ランク']}ランク: {res['コード']} | ROE {roe_disp}"):
-                        c1, c2 = st.columns([1, 1])
-                        with c1:
-                            st.info(res['AI解説'])
-                            per_text = f"{res['PER']:.1f}倍" if res['PER'] else "不明"
-                            st.table(pd.DataFrame({
-                                "指標": ["成長率", "利益率", "ROE(効率)", "自己資本(安全)", "PER(割安)"],
-                                "数値": [f"{res['成長率']:.1f}%", f"{res['利益率']:.1f}%", roe_disp, eq_disp, per_text]
-                            }))
-                        with c2:
-                            if res['Ticker']: st.line_chart(res['Ticker'].history(period="1y")['Close'])
-            else: st.warning("条件に合う銘柄なし")
-        else: st.error("トークンエラー")
+            res = app.analyze_sector(target, limit)
+            if res:
+                for r in res:
+                    with st.expander(f"{r['ランク']}ランク: {r['コード']}"):
+                        st.write(r['AI解説'])
+                        if r['Ticker']: st.line_chart(r['Ticker'].history(period="1y")['Close'])
+            else: st.warning("なし")
+        else: st.error("認証エラー")
